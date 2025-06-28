@@ -8,6 +8,7 @@
 (define-constant err-already-released (err u503))
 (define-constant err-not-expired (err u504))
 (define-constant err-insufficient-payment (err u505))
+(define-constant err-invalid-fee (err u506))
 
 (define-data-var escrow-counter uint u0)
 (define-data-var platform-fee uint u100) ;; 1% platform fee
@@ -52,8 +53,8 @@
       amount: amount,
       description: description,
       status: "active",
-      created-at: block-height,
-      timeout: (+ block-height timeout-blocks),
+      created-at: stacks-block-height,
+      timeout: (+ stacks-block-height timeout-blocks),
       buyer-approved: false,
       seller-approved: false,
       arbiter-decision: none
@@ -69,10 +70,16 @@
     (asserts! (is-eq (get status escrow) "active") err-already-released)
     
     (if (is-eq tx-sender (get buyer escrow))
-      (map-set escrows escrow-id (merge escrow {buyer-approved: true}))
+      (begin
+        (map-set escrows escrow-id (merge escrow {buyer-approved: true}))
+        (ok true)
+      )
       (if (is-eq tx-sender (get seller escrow))
-        (map-set escrows escrow-id (merge escrow {seller-approved: true}))
-        (err err-unauthorized)
+        (begin
+          (map-set escrows escrow-id (merge escrow {seller-approved: true}))
+          (ok true)
+        )
+        err-unauthorized
       )
     )
   )
@@ -103,7 +110,7 @@
   (let ((escrow (unwrap! (get-escrow escrow-id) err-escrow-not-found)))
     (asserts! (is-eq tx-sender (get buyer escrow)) err-unauthorized)
     (asserts! (is-eq (get status escrow) "active") err-already-released)
-    (asserts! (>= block-height (get timeout escrow)) err-not-expired)
+    (asserts! (>= stacks-block-height (get timeout escrow)) err-not-expired)
     
     ;; Refund to buyer
     (try! (as-contract (stx-transfer? (get amount escrow) tx-sender (get buyer escrow))))
@@ -128,14 +135,14 @@
         (try! (as-contract (stx-transfer? seller-amount tx-sender (get seller escrow))))
         (try! (as-contract (stx-transfer? fee tx-sender contract-owner)))
         (map-set escrows escrow-id (merge escrow {status: "completed", arbiter-decision: (some true)}))
+        (ok true)
       )
       (begin
         (try! (as-contract (stx-transfer? (get amount escrow) tx-sender (get buyer escrow))))
         (map-set escrows escrow-id (merge escrow {status: "refunded", arbiter-decision: (some false)}))
+        (ok false)
       )
     )
-    
-    (ok release-to-seller)
   )
 )
 
@@ -143,7 +150,8 @@
   (let ((escrow (unwrap! (get-escrow escrow-id) err-escrow-not-found)))
     (asserts! (or (is-eq tx-sender (get buyer escrow))
                   (is-eq tx-sender (get seller escrow))
-                  (is-some (get arbiter escrow))) err-unauthorized)
+                  (and (is-some (get arbiter escrow))
+                       (is-eq tx-sender (unwrap-panic (get arbiter escrow))))) err-unauthorized)
     
     (map-set escrow-messages {escrow-id: escrow-id, sender: tx-sender} message)
     (ok true)
@@ -151,8 +159,10 @@
 )
 
 (define-public (set-platform-fee (new-fee uint))
-  (asserts! (is-eq tx-sender contract-owner) err-owner-only)
-  (asserts! (<= new-fee u500) (err u506)) ;; Max 5% fee
-  (var-set platform-fee new-fee)
-  (ok true)
+  (begin
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    (asserts! (<= new-fee u500) err-invalid-fee) ;; Max 5% fee
+    (var-set platform-fee new-fee)
+    (ok true)
+  )
 )
